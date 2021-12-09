@@ -63,7 +63,7 @@ void fmhalib_fwd(const void *qkv_ptr,
                  const uint64_t rnd_seed,
                  const int64_t *offset_ptr,
                  const uint64_t rnd_offset,
-                 bool is_device_rnd,
+                 const bool is_device_rnd,
                  cudaStream_t stream,
                  void *ctx_ptr,
                  void *s_ptr);
@@ -83,7 +83,7 @@ void fmhalib_fwd_nl(const void *qkv_ptr,
                     const uint64_t rnd_seed,
                     const int64_t *offset_ptr,
                     const uint64_t rnd_offset,
-                    bool is_device_rnd,
+                    const bool is_device_rnd,
                     cudaStream_t stream,
                     void *ctx_ptr,
                     void *s_ptr);
@@ -135,8 +135,40 @@ void fmhalib_bwd_nl(const void *dout_ptr,
                     void *dqkv_ptr,
 		    void *dkv_ptr);
 
+/**
+ * Set the random seed to the inner seed manager. 
+ *
+ * This function may call `cudaMalloc` when it is
+ * called at the first time.
+ *
+ * This function may report error when `cudaMalloc`
+ * fails. Please get the error by calling
+ * `fmhalib_error()`.   
+ */
+void fmhalib_random_seed(const uint64_t rnd_seed); 
+
+/**
+ * Increase the state of the inner seed manager by
+ * `increment`. The `increment` can be obtained by
+ * calling `fmhalib_random_increment(seq_len)`.  
+ *
+ * This function may report error when any of
+ * `rnd_seed`, `offset_ptr`, `rnd_offset` and
+ * `is_device_rnd` is NULL. Please get the error by 
+ * calling `fmhalib_error()`.
+ *
+ * TODO(zengjinle): support is_device_rnd = true.
+ */
+void fmhalib_random_state(const uint64_t increment,
+                          uint64_t *rnd_seed,
+                          int64_t **offset_ptr,
+                          uint64_t *rnd_offset,
+                          bool *is_device_rnd);
+
+// This function never reports error 
 int fmhalib_random_increment(const int seq_len);
 
+// This function never reports error 
 int fmhalib_bwd_nl_num_chunks(const int batch_size);
 
 #ifdef __cplusplus
@@ -190,6 +222,8 @@ _DEFINE_FMHALIB_DYNLOAD_FUNC(fmhalib_fwd, fwd);
 _DEFINE_FMHALIB_DYNLOAD_FUNC(fmhalib_bwd, bwd);
 _DEFINE_FMHALIB_DYNLOAD_FUNC(fmhalib_fwd_nl, fwd_nl);
 _DEFINE_FMHALIB_DYNLOAD_FUNC(fmhalib_bwd_nl, bwd_nl);
+_DEFINE_FMHALIB_DYNLOAD_FUNC(fmhalib_random_seed, random_seed);
+_DEFINE_FMHALIB_DYNLOAD_FUNC(fmhalib_random_state, random_state); 
 _DEFINE_FMHALIB_DYNLOAD_FUNC(fmhalib_random_increment, random_increment);
 _DEFINE_FMHALIB_DYNLOAD_FUNC(fmhalib_bwd_nl_num_chunks, bwd_nl_num_chunks);
 

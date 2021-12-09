@@ -30,6 +30,7 @@
 #include <string>
 #include <exception>
 #include <stdexcept>
+#include <mutex>
 #include <memory>
 #include "cuda.h"
 #include "cuda_runtime.h"
@@ -75,7 +76,77 @@ const char *fmhalib_error() {
 }
 
 #define FMHALIB_BEGIN_FUNC fmhalib_clear_error(); try {
-#define FMHALIB_END_FUNC } catch (::std::exception &__e) { fmhalib_set_error(__e.what()); } catch (...) { fmhalib_set_error(nullptr); } 
+#define FMHALIB_END_FUNC } catch (::std::exception &__e) { fmhalib_set_error(__e.what()); } catch (...) { fmhalib_set_error(nullptr); }
+
+struct FMHALibSeedManager {
+ private:
+  FMHALibSeedManager() {
+    int64_t *tmp;
+    ASSERT_CHECK(cudaMalloc(&tmp, sizeof(*tmp)) == cudaSuccess);
+    gpu_offset_ptr = tmp;
+    seed = 67280421310721;
+    cpu_offset = 0;
+    gpu_offset = 0;
+    is_device_rnd = false;
+  }
+ 
+ public: 
+  static FMHALibSeedManager &Instance() {
+    static FMHALibSeedManager instance;
+    return instance;
+  }
+
+  ~FMHALibSeedManager() {
+    if (gpu_offset_ptr) cudaFree(gpu_offset_ptr);
+  }
+
+  uint64_t seed;
+  uint64_t cpu_offset;
+  int64_t *gpu_offset_ptr;
+  uint32_t gpu_offset;
+  bool is_device_rnd;
+  std::mutex mtx;
+};	
+
+void fmhalib_random_seed(const uint64_t rnd_seed) {
+  FMHALIB_BEGIN_FUNC
+  auto &g_seed_manager = FMHALibSeedManager::Instance();  
+  std::lock_guard<std::mutex> guard(g_seed_manager.mtx); 
+  g_seed_manager.seed = rnd_seed;
+  g_seed_manager.cpu_offset = 0;
+  g_seed_manager.gpu_offset = 0;
+  FMHALIB_END_FUNC
+}
+
+void fmhalib_random_state(const uint64_t increment,
+		          uint64_t *rnd_seed,
+		          int64_t **offset_ptr,
+		          uint64_t *rnd_offset,
+		          bool *is_device_rnd) {
+  FMHALIB_BEGIN_FUNC
+  ASSERT_CHECK(rnd_seed != nullptr);
+  ASSERT_CHECK(offset_ptr != nullptr);
+  ASSERT_CHECK(rnd_offset != nullptr);
+  ASSERT_CHECK(is_device_rnd != nullptr);
+
+  auto inc = ((increment + 3) / 4) * 4;
+
+  auto &g_seed_manager = FMHALibSeedManager::Instance();
+  std::lock_guard<std::mutex> guard(g_seed_manager.mtx);
+  *rnd_seed = g_seed_manager.seed;
+  if (g_seed_manager.is_device_rnd) {
+    *rnd_offset = static_cast<uint64_t>(g_seed_manager.gpu_offset);
+    *offset_ptr = g_seed_manager.gpu_offset_ptr;
+    *is_device_rnd = true;
+    g_seed_manager.gpu_offset += static_cast<uint32_t>(inc);
+  } else {
+    *rnd_offset = g_seed_manager.cpu_offset; 
+    *offset_ptr = nullptr;
+    *is_device_rnd = false;
+    g_seed_manager.cpu_offset += inc;  
+  }
+  FMHALIB_END_FUNC
+}
 
 void set_params(Fused_multihead_attention_fprop_params &params,
                 // sizes
@@ -162,7 +233,7 @@ void fmhalib_fwd(const void *qkv_ptr,
 	         const uint64_t rnd_seed, 
 		 const int64_t *offset_ptr,
 	         const uint64_t rnd_offset,
-		 bool is_device_rnd,
+		 const bool is_device_rnd,
 	         cudaStream_t stream,
 	         void *ctx_ptr,
 	         void *s_ptr) {
@@ -283,7 +354,7 @@ void fmhalib_fwd_nl(const void *qkv_ptr,
                     const uint64_t rnd_seed,
                     const int64_t *offset_ptr,
                     const uint64_t rnd_offset,
-                    bool is_device_rnd,
+                    const bool is_device_rnd,
                     cudaStream_t stream,
                     void *ctx_ptr,
                     void *s_ptr) {
