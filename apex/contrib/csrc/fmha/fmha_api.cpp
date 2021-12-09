@@ -70,7 +70,7 @@ void fmhalib_set_error(const char *msg) {
   fmhalib_err_msg = std::move(new_err_msg);
 }
 
-const char *fmhalib_get_error() {
+const char *fmhalib_error() {
   return fmhalib_err_msg.get();
 }
 
@@ -131,7 +131,7 @@ void set_params(Fused_multihead_attention_fprop_params &params,
 }
 
 void fmhalib_fwd(const void *qkv_ptr, 
-	         const int *cu_seqlens_ptr,
+	         const void *cu_seqlens_ptr,
 		 const int total,
                  const int num_heads,
                  const int head_size,
@@ -182,17 +182,17 @@ void fmhalib_fwd(const void *qkv_ptr,
                num_heads,
                head_size,
                const_cast<void*>(qkv_ptr),
-               const_cast<int32_t*>(cu_seqlens_ptr),
+               const_cast<void*>(cu_seqlens_ptr),
                ctx_ptr,
                s_ptr,
                p_dropout);
 
     if (is_training) {
-        if (is_device_rnd) {
-            params.philox_args = at::PhiloxCudaState(rnd_seed, rnd_offset); 
-        } else {
+	if (is_device_rnd) {
 	    params.philox_args = at::PhiloxCudaState(rnd_seed, const_cast<int64_t *>(offset_ptr), static_cast<uint32_t>(rnd_offset));
-        }
+        } else {
+	    params.philox_args = at::PhiloxCudaState(rnd_seed, rnd_offset);
+	}
     }
 
     launch(params, is_training, stream);

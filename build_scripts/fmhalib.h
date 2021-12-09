@@ -24,7 +24,7 @@ extern "C" {
  * Note that the error message is thread local, do not get the error message
  * in another thread.
  */
-const char *fmhalib_get_error();
+const char *fmhalib_error();
 
 /**
  * qkv_ptr: FP16 Tensor with shape [total, 3, num_heads, head_size] 
@@ -46,7 +46,7 @@ const char *fmhalib_get_error();
  * s_ptr: output FP16 Tensor with shape [batch_size, num_heads, max_seq_len, max_seq_len]  
  */
 void fmhalib_fwd(const void *qkv_ptr,
-                 const int *cu_seqlens_ptr,
+                 const void *cu_seqlens_ptr,
                  const int total,
                  const int num_heads,
                  const int head_size,
