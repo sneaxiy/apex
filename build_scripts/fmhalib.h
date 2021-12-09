@@ -63,6 +63,26 @@ void fmhalib_fwd(const void *qkv_ptr,
                  void *s_ptr);
 
 /**
+ * Almost the same with fmhalib_fwd except for that max_seq_len must be 512.
+ */
+void fmhalib_fwd_nl(const void *qkv_ptr,
+                    const void *cu_seqlens_ptr,
+                    const int total,
+                    const int num_heads,
+                    const int head_size,
+                    const int batch_size,
+                    const float p_dropout,
+                    const int max_seq_len,
+                    const bool is_training,
+                    const uint64_t rnd_seed,
+                    const int64_t *offset_ptr,
+                    const uint64_t rnd_offset,
+                    bool is_device_rnd,
+                    cudaStream_t stream,
+                    void *ctx_ptr,
+                    void *s_ptr);
+
+/**
  * dout_ptr: the gradient of the output `ctx_ptr` in fmhalib_fwd
  * qkv_ptr: same with the fmhalib_fwd 
  * cu_seqlens_ptr: same with the fmhalib_fwd
@@ -89,6 +109,29 @@ void fmhalib_bwd(const void *dout_ptr,
                  cudaStream_t stream,
                  void *softmax_ptr,  // will be overwritten
                  void *dqkv_ptr);
+
+/**
+ * Almost the same with fmhalib_bwd except for that max_seq_len must be 512.
+ * There is an extra FP16 output dkv_ptr with shape [total, num_chunks, 2, num_heads, head_size],
+ * where num_chunks can be obtained by calling fmhalib_bwd_nl_num_chunks(batch_size). 
+ */
+void fmhalib_bwd_nl(const void *dout_ptr,
+                    const void *qkv_ptr,
+                    const void *cu_seqlens_ptr,
+                    const int total,
+                    const int num_heads,
+                    const int head_size,
+                    const int batch_size,
+                    const float p_dropout,
+                    const int max_seq_len,
+                    cudaStream_t stream,
+                    void *softmax_ptr,  // will be overwritten
+                    void *dqkv_ptr,
+		    void *dkv_ptr);
+
+int fmhalib_random_increment(const int seq_len);
+
+int fmhalib_bwd_nl_num_chunks(const int batch_size);
 
 #ifdef __cplusplus
 }
