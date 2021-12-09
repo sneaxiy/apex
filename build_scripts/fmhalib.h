@@ -6,6 +6,12 @@
 #include "cuda_runtime.h"
 
 #ifdef __cplusplus
+#include "dlfcn.h"
+#include <cstdlib>
+#include <stdexcept>
+#endif
+
+#ifdef __cplusplus
 extern "C" {
 #endif
 
@@ -135,4 +141,57 @@ int fmhalib_bwd_nl_num_chunks(const int batch_size);
 
 #ifdef __cplusplus
 }
+#endif
+
+#ifdef __cplusplus
+namespace fmhalib {
+
+namespace {
+inline void *OpenFMHALibHandle() {
+  const char *env_var = "FMHALIB_PATH";
+  const char *lib_path = std::getenv(env_var);
+  if (!lib_path) {
+    lib_path = "libfmha.so";
+  }
+  void *handle = dlopen(lib_path, RTLD_LAZY);
+  if (!handle) {
+    throw std::runtime_error(dlerror());
+  }
+  return handle; 
+}	
+
+inline void *GetFMHALibSymbol(const char *name) {
+  static void *lib_handle = OpenFMHALibHandle();
+  void *symbol = dlsym(lib_handle, name);
+  if (!symbol) {
+    throw std::runtime_error(dlerror());
+  }
+  return symbol;
+}
+}
+
+#define _DEFINE_FMHALIB_DYNLOAD_FUNC(__sym_name, __func_name)       \
+   namespace {                                                      \
+   static auto DynLoad_##__sym_name() -> decltype(&::__sym_name) {  \
+     using __FuncType = decltype(&::__sym_name);                    \
+     static auto *__func = reinterpret_cast<__FuncType>(            \
+                         GetFMHALibSymbol(#__sym_name));            \
+     return __func;                                                 \
+   }                                                                \
+   }                                                                \
+   template <typename ...__ARGS>                                    \
+   inline auto __func_name(__ARGS... __args)                        \
+               -> decltype(::__sym_name(__args...)) {               \
+     return DynLoad_##__sym_name()(__args...);                      \
+   }
+
+_DEFINE_FMHALIB_DYNLOAD_FUNC(fmhalib_error, error);
+_DEFINE_FMHALIB_DYNLOAD_FUNC(fmhalib_fwd, fwd);
+_DEFINE_FMHALIB_DYNLOAD_FUNC(fmhalib_bwd, bwd);
+_DEFINE_FMHALIB_DYNLOAD_FUNC(fmhalib_fwd_nl, fwd_nl);
+_DEFINE_FMHALIB_DYNLOAD_FUNC(fmhalib_bwd_nl, bwd_nl);
+_DEFINE_FMHALIB_DYNLOAD_FUNC(fmhalib_random_increment, random_increment);
+_DEFINE_FMHALIB_DYNLOAD_FUNC(fmhalib_bwd_nl_num_chunks, bwd_nl_num_chunks);
+
+} // namespace fmhalib
 #endif
