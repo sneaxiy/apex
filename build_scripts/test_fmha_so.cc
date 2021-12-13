@@ -56,6 +56,9 @@ int main() {
 
   fmhalib::bwd_nl(nullptr, nullptr, nullptr, 0, 0, 0, 0, 0.0f, 0, nullptr, nullptr, nullptr, nullptr);
   PrintErrorCxx();
+
+  std::cout << fmhalib_seq_len(200) << std::endl;
+  std::cout << fmhalib::seq_len(200) << std::endl;
   
   return 0;
 }

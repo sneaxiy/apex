@@ -33,14 +33,19 @@ extern "C" {
 const char *fmhalib_error();
 
 /**
+ * This function may return -1 if seq_len is invalid.
+ */
+int fmhalib_seq_len(const int seq_len);
+
+/**
  * qkv_ptr: FP16 Tensor with shape [total, 3, num_heads, head_size] 
  * cu_seqlens_ptr: INT32 Tensor with shape [batch_size + 1]
  * total: the total seqence length (not including padding) of the mini-batch   
- * num_heads: head number. 
+ * num_heads: head number 
  * head_size: must be 64
  * batch_size: batch size
  * p_dropout: dropout probability
- * max_seq_len: must be any of [128, 256, 384, 512]
+ * max_seq_len: must be <= 512
  * is_training: whether to run train or inference
  * rnd_seed: the random seed
  * offset_ptr: the device pointer to generate the random seed. It can be NULL if is_device_rnd == false. 
@@ -49,7 +54,7 @@ const char *fmhalib_error();
  * stream: the CUDA stream.
  *
  * ctx_ptr: output FP16 tensor with shape [total, num_heads, head_size]
- * s_ptr: output FP16 Tensor with shape [batch_size, num_heads, max_seq_len, max_seq_len]  
+ * s_ptr: output FP16 Tensor with shape [batch_size, num_heads, seq_len, seq_len], where seq_len can be obtained by calling `fmhalib_seq_len(max_seq_len)` 
  */
 void fmhalib_fwd(const void *qkv_ptr,
                  const void *cu_seqlens_ptr,
@@ -178,54 +183,28 @@ int fmhalib_bwd_nl_num_chunks(const int batch_size);
 #ifdef __cplusplus
 namespace fmhalib {
 
-namespace {
-inline void *OpenFMHALibHandle() {
-  const char *env_var = "FMHALIB_PATH";
-  const char *lib_path = std::getenv(env_var);
-  if (!lib_path) {
-    lib_path = "libfmha.so";
-  }
-  void *handle = dlopen(lib_path, RTLD_LAZY);
-  if (!handle) {
-    throw std::runtime_error(dlerror());
-  }
-  return handle; 
-}	
-
-inline void *GetFMHALibSymbol(const char *name) {
-  static void *lib_handle = OpenFMHALibHandle();
-  void *symbol = dlsym(lib_handle, name);
-  if (!symbol) {
-    throw std::runtime_error(dlerror());
-  }
-  return symbol;
-}
-}
-
-#define _DEFINE_FMHALIB_DYNLOAD_FUNC(__sym_name, __func_name)       \
-   namespace {                                                      \
-   static auto DynLoad_##__sym_name() -> decltype(&::__sym_name) {  \
-     using __FuncType = decltype(&::__sym_name);                    \
-     static auto *__func = reinterpret_cast<__FuncType>(            \
-                         GetFMHALibSymbol(#__sym_name));            \
-     return __func;                                                 \
-   }                                                                \
-   }                                                                \
-   template <typename ...__ARGS>                                    \
-   inline auto __func_name(__ARGS... __args)                        \
-               -> decltype(::__sym_name(__args...)) {               \
-     return DynLoad_##__sym_name()(__args...);                      \
+#define _DEFINE_CXX_FMHALIB_DYNLOAD_FUNC(__func_name)     \
+   extern decltype(&fmhalib_##__func_name)                \
+       DynLoad_##fmhalib_##__func_name();                 \
+   template <typename ...__ARGS>                          \
+   inline auto __func_name(__ARGS... __args)              \
+       -> decltype(::fmhalib_##__func_name(__args...)) {  \
+     return DynLoad_##fmhalib_##__func_name()(__args...); \
    }
 
-_DEFINE_FMHALIB_DYNLOAD_FUNC(fmhalib_error, error);
-_DEFINE_FMHALIB_DYNLOAD_FUNC(fmhalib_fwd, fwd);
-_DEFINE_FMHALIB_DYNLOAD_FUNC(fmhalib_bwd, bwd);
-_DEFINE_FMHALIB_DYNLOAD_FUNC(fmhalib_fwd_nl, fwd_nl);
-_DEFINE_FMHALIB_DYNLOAD_FUNC(fmhalib_bwd_nl, bwd_nl);
-_DEFINE_FMHALIB_DYNLOAD_FUNC(fmhalib_random_seed, random_seed);
-_DEFINE_FMHALIB_DYNLOAD_FUNC(fmhalib_random_state, random_state); 
-_DEFINE_FMHALIB_DYNLOAD_FUNC(fmhalib_random_increment, random_increment);
-_DEFINE_FMHALIB_DYNLOAD_FUNC(fmhalib_bwd_nl_num_chunks, bwd_nl_num_chunks);
+#define _CXX_FMHALIB_FOR_EACH_FUNC(__macro) \
+   __macro(error);                          \
+   __macro(seq_len);                        \
+   __macro(fwd);                            \
+   __macro(bwd);                            \
+   __macro(fwd_nl);                         \
+   __macro(bwd_nl);                         \
+   __macro(random_seed);                    \
+   __macro(random_state);                   \
+   __macro(random_increment);               \
+   __macro(bwd_nl_num_chunks)
+
+_CXX_FMHALIB_FOR_EACH_FUNC(_DEFINE_CXX_FMHALIB_DYNLOAD_FUNC);
 
 } // namespace fmhalib
 #endif

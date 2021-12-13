@@ -56,11 +56,7 @@ thread_local std::unique_ptr<char[]> fmhalib_err_msg;
 extern "C" {
 #endif
 
-void fmhalib_clear_error() {
-  fmhalib_err_msg = nullptr;
-}
-
-void fmhalib_set_error(const char *msg) {
+static void fmhalib_set_error(const char *msg) {
   if (msg == nullptr || *msg == '\0') {
     msg = "unknown error";
   }
@@ -75,7 +71,7 @@ const char *fmhalib_error() {
   return fmhalib_err_msg.get();
 }
 
-#define FMHALIB_BEGIN_FUNC fmhalib_clear_error(); try {
+#define FMHALIB_BEGIN_FUNC try {
 #define FMHALIB_END_FUNC } catch (::std::exception &__e) { fmhalib_set_error(__e.what()); } catch (...) { fmhalib_set_error(nullptr); }
 
 struct FMHALibSeedManager {
@@ -148,18 +144,18 @@ void fmhalib_random_state(const uint64_t increment,
   FMHALIB_END_FUNC
 }
 
-void set_params(Fused_multihead_attention_fprop_params &params,
-                // sizes
-                const size_t b,
-                const size_t s,
-                const size_t h,
-                const size_t d,
-                // device pointers
-                void *qkv_packed_d,
-                void *cu_seqlens_d,
-                void *o_packed_d,
-                void *s_d,
-                float p_dropout) {
+static void set_params(Fused_multihead_attention_fprop_params &params,
+                       // sizes
+                       const size_t b,
+                       const size_t s,
+                       const size_t h,
+                       const size_t d,
+                       // device pointers
+                       void *qkv_packed_d,
+                       void *cu_seqlens_d,
+                       void *o_packed_d,
+                       void *s_d,
+                       float p_dropout) {
 
     Data_type acc_type = DATA_TYPE_FP32;
     Data_type data_type = DATA_TYPE_FP16;
@@ -221,6 +217,22 @@ int fmhalib_bwd_nl_num_chunks(const int batch_size) {
     return num_chunks;
 }
 
+int fmhalib_seq_len(const int max_seq_len) {
+    if (max_seq_len < 0) {
+      return -1;
+    }
+
+    const int seq_lens[] = {128, 256, 384, 512}; 
+    constexpr int n = sizeof(seq_lens) / sizeof(seq_lens[0]);  
+#pragma unroll n
+    for (int i = 0; i < n; ++i) {
+      if (max_seq_len <= seq_lens[i]) {
+	return seq_lens[i];
+      }
+    } 
+    return -1;
+}
+
 void fmhalib_fwd(const void *qkv_ptr, 
 	         const void *cu_seqlens_ptr,
 		 const int total,
@@ -240,16 +252,16 @@ void fmhalib_fwd(const void *qkv_ptr,
     FMHALIB_BEGIN_FUNC
     int seq_len;
     auto launch = &run_fmha_fp16_512_64_sm80;
-    if (max_seq_len == 128) {
+    if (max_seq_len <= 128) {
         seq_len = 128;
         launch = &run_fmha_fp16_128_64_sm80;
-    } else if (max_seq_len == 256) {
+    } else if (max_seq_len <= 256) {
         seq_len = 256;
         launch = &run_fmha_fp16_256_64_sm80;
-    } else if (max_seq_len == 384) {
+    } else if (max_seq_len <= 384) {
         seq_len = 384;
         launch = &run_fmha_fp16_384_64_sm80;
-    } else if (max_seq_len == 512) {
+    } else if (max_seq_len <= 512) {
         seq_len = 512;
         launch = &run_fmha_fp16_512_64_sm80;
     } else {
@@ -299,16 +311,16 @@ void fmhalib_bwd(const void *dout_ptr,
     FMHALIB_BEGIN_FUNC
     int seq_len = 512;
     auto launch = &run_fmha_dgrad_fp16_512_64_sm80;
-    if( max_seq_len == 128 ) {
+    if( max_seq_len <= 128 ) {
         seq_len = 128;
         launch = &run_fmha_dgrad_fp16_128_64_sm80;
-    } else if( max_seq_len == 256 ) {
+    } else if( max_seq_len <= 256 ) {
         seq_len = 256;
         launch = &run_fmha_dgrad_fp16_256_64_sm80;
-    } else if( max_seq_len == 384 ) {
+    } else if( max_seq_len <= 384 ) {
         seq_len = 384;
         launch = &run_fmha_dgrad_fp16_384_64_sm80;
-    } else if( max_seq_len == 512 ) {
+    } else if( max_seq_len <= 512 ) {
         seq_len = 512;
         launch = &run_fmha_dgrad_fp16_512_64_sm80;
     } else {
@@ -470,4 +482,43 @@ void fmhalib_bwd_nl(const void *dout_ptr,
 
 #ifdef __cplusplus
 }
+#endif
+
+#ifdef __cplusplus
+namespace fmhalib {
+
+static void *OpenFMHALibHandle() {
+  const char *env_var = "FMHALIB_PATH";
+  const char *lib_path = std::getenv(env_var);
+  if (!lib_path) {
+    lib_path = "libfmha.so";
+  }
+  void *handle = dlopen(lib_path, RTLD_LAZY);
+  if (!handle) {
+    throw std::runtime_error(dlerror());
+  }
+  return handle;
+}
+
+static void *GetFMHALibSymbol(const char *name) {
+  static void *lib_handle = OpenFMHALibHandle();
+  void *symbol = dlsym(lib_handle, name);
+  if (!symbol) {
+    throw std::runtime_error(dlerror());
+  }
+  return symbol;
+}
+
+#define _DYLOAD_CXX_FMHALIB_FUNC(__func_name)               \
+   auto DynLoad_##fmhalib_##__func_name()                   \
+           -> decltype(&::fmhalib_##__func_name) {          \
+     using __FuncType = decltype(&::fmhalib_##__func_name); \
+     static auto *__func = reinterpret_cast<__FuncType>(    \
+         GetFMHALibSymbol("fmhalib_"#__func_name));         \
+     return __func;                                         \
+   }
+
+_CXX_FMHALIB_FOR_EACH_FUNC(_DYLOAD_CXX_FMHALIB_FUNC);
+
+} // namespace fmhalib
 #endif
