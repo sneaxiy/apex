@@ -20,6 +20,9 @@ function build_nvcc_obj() {
 	-DVERSION_GE_1_5
 }
 
+rm -rf *.so
+rm -rf *.o
+
 APEX_CU_SRC_DIR=${ROOT_DIR}/apex/contrib/csrc/fmha/src
 build_nvcc_obj ${APEX_CU_SRC_DIR}/../fmha_api.cpp
 build_nvcc_obj $APEX_CU_SRC_DIR/fmha_noloop_reduce.cu
@@ -32,6 +35,9 @@ build_nvcc_obj $APEX_CU_SRC_DIR/fmha_dgrad_fp16_256_64_kernel.sm80.cu
 build_nvcc_obj $APEX_CU_SRC_DIR/fmha_dgrad_fp16_384_64_kernel.sm80.cu
 build_nvcc_obj $APEX_CU_SRC_DIR/fmha_dgrad_fp16_512_64_kernel.sm80.cu
 
-rm -rf *.so
 nvcc -shared -Xcompiler="-fPIC" -o libfmha.so *.o 
 rm -rf *.o
+INSTALL_DIR=/usr/local/lib
+rm -rf "$INSTALL_DIR/libfmha.so"
+cp libfmha.so "$INSTALL_DIR/"
+ldconfig

@@ -36,6 +36,7 @@
 #include "cuda_runtime.h"
 #include "math.h"
 #include "fmhalib.h"
+#include "dlfcn.h"
 
 #define ASSERT_CHECK(__cond)                             \
       do {                                               \

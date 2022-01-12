@@ -6,12 +6,6 @@
 #include "cuda_runtime.h"
 
 #ifdef __cplusplus
-#include "dlfcn.h"
-#include <cstdlib>
-#include <stdexcept>
-#endif
-
-#ifdef __cplusplus
 extern "C" {
 #endif
 
