@@ -6,6 +6,10 @@ function build_nvcc_obj() {
     nvcc -c $1 \
         -O3 \
 	-Xcompiler="-fPIC" \
+        -Xcompiler="-O3" \
+        -Xcompiler="-DVERSION_GE_1_1" \
+        -Xcompiler="-DVERSION_GE_1_3" \
+        -Xcompiler="-DDVERSION_GE_1_5" \
 	-gencode arch=compute_80,code=sm_80 \
 	-U__CUDA_NO_HALF_OPERATORS__ \
 	-U__CUDA_NO_HALF_CONVERSIONS__ \
