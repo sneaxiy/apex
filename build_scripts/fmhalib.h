@@ -9,6 +9,8 @@
 extern "C" {
 #endif
 
+const char *fmhalib_version();
+
 /**
  * All functions of the FMHALIB does not return the error flag and
  * does not throw any exception. If users want to check whether there
