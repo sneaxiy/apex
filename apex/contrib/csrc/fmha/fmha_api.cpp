@@ -59,6 +59,10 @@ thread_local std::unique_ptr<char[]> fmhalib_err_msg;
 extern "C" {
 #endif
 
+const char *fmhalib_version() {
+   return "0.1";
+}
+
 static void fmhalib_set_error(const char *msg) {
   if (msg == nullptr || *msg == '\0') {
     msg = "unknown error";
