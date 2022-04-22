@@ -38,8 +38,8 @@ inline __device__ void stg128(void *ptr, const float4 &data) {
 template<typename T, int THREADS, int HIDDEN_SIZE, int CHUNKS>
 __global__ __launch_bounds__(THREADS) void fmha_noloop_reduce_kernel(void *__restrict__ out,
                                                                      const void *__restrict__ in,
-                                                                     const int *__restrict__ cu_seqlens,
-                                                                     const int batch_size) {
+                                                                     const int batch_size,
+								     const int total) {
 
     enum { BYTES_PER_LDG = 16 };
     enum { NUM_ELTS = BYTES_PER_LDG / sizeof(T) };
@@ -67,7 +67,6 @@ __global__ __launch_bounds__(THREADS) void fmha_noloop_reduce_kernel(void *__res
     };
 
     // ZERO-OUT invalid positions in dQKV
-    const int total = cu_seqlens[batch_size];
     if(blockIdx.x >= total){
         enum { BYTES_PER_QKV_ROW = 3 * HIDDEN_SIZE * sizeof(T) };
         enum { STGS = BYTES_PER_QKV_ROW / BYTES_PER_LDG };
@@ -162,9 +161,9 @@ void fmha_run_noloop_reduce(void *out,
         constexpr int THREADS = 256;
 
         if( num_chunks == 2 ) {
-            fmha_noloop_reduce_kernel<half, THREADS, HIDDEN_SIZE, 2><<<blocks, THREADS, 0, stream>>>(out, in, cu_seqlens, batch_size);
+            fmha_noloop_reduce_kernel<half, THREADS, HIDDEN_SIZE, 2><<<blocks, THREADS, 0, stream>>>(out, in, batch_size, total);
         } else if( num_chunks == 3 ) {
-            fmha_noloop_reduce_kernel<half, THREADS, HIDDEN_SIZE, 3><<<blocks, THREADS, 0, stream>>>(out, in, cu_seqlens, batch_size);
+            fmha_noloop_reduce_kernel<half, THREADS, HIDDEN_SIZE, 3><<<blocks, THREADS, 0, stream>>>(out, in, batch_size, total);
         } else {
             assert(false && "Unsupported num_chunks");
         }
