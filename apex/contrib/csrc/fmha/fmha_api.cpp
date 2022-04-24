@@ -260,14 +260,14 @@ void fmhalib_fwd(const void *qkv_ptr,
     seq_len_group_idx[cur_idx] = static_cast<const int*>(host_cu_seqlens_ptr)[batch_size];
     group_len[cur_group] = cur_group_len;
 
-#if 1 
+#if 0 
     printf("batch_size = %d\n", batch_size); 
     printf("group_size = %d, %d, %d\n", group_len[0], group_len[1], group_len[2]);
 #endif
     if (group_len[0] + group_len[1] + group_len[2] != batch_size) {
         ASSERT_CHECK(false);
     }
-#if 1 
+#if 0 
     //for (int i = 0; i < batch_size; i++) {
     //  printf("seq_len_per_sample[%d] = %d\n", i, seq_len_per_sample[i]);
     //}
@@ -508,8 +508,8 @@ void fmhalib_bwd(const void *dout_ptr,
     seq_len_group_idx[cur_idx] = static_cast<const int*>(host_cu_seqlens_ptr)[batch_size];
     group_len[cur_group] = cur_group_len;
     
-    printf("limin: begin backward\n");
-#if 1
+    // printf("limin: begin backward\n");
+#if 0 
     printf("batch_size = %d\n", batch_size); 
     printf("group_size = %d, %d, %d\n", group_len[0], group_len[1], group_len[2]);
 #endif
@@ -547,12 +547,14 @@ void fmhalib_bwd(const void *dout_ptr,
                p_dropout);
 #if 1 
     int qkv_offset = seq_len_group_idx[1] * head_size * num_heads * 3;
+    int output_offset = seq_len_group_idx[1] * head_size * num_heads;
     const __half* new_qkv_ptr = static_cast<const __half*>(qkv_ptr) + qkv_offset;
     const int* new_cu_seqlens_ptr = static_cast<const int*>(cu_seqlens_ptr) + group_len[0];
-    const __half* new_dout_ptr = static_cast<const __half*>(dout_ptr) + qkv_offset;
+    const __half* new_dout_ptr = static_cast<const __half*>(dout_ptr) + output_offset;
     // limin-todo: 
     __half* new_softmax_ptr = static_cast<__half*>(softmax_ptr) + group_len[0] * num_heads * 512 * 512; 
     if (group_len[1] > 0) {
+      // printf("384_bs = %d, seq_len_384=%d\n", group_len[1], seq_len_384);
       set_params(params_384,
                group_len[1], // batch_size,
                seq_len_384, // seq_len,
@@ -565,9 +567,10 @@ void fmhalib_bwd(const void *dout_ptr,
                p_dropout);
     }
     int qkv_offset_2 = seq_len_group_idx[2] * head_size * num_heads * 3;
+    int output_offset_2 = seq_len_group_idx[2] * head_size * num_heads;
     const __half* new_qkv_ptr_2 = static_cast<const __half*>(qkv_ptr) + qkv_offset_2;
     const int* new_cu_seqlens_ptr_2 = static_cast<const int*>(cu_seqlens_ptr) + group_len[0] + group_len[1];
-    const __half* new_dout_ptr_2 = static_cast<const __half*>(dout_ptr) + qkv_offset_2;
+    const __half* new_dout_ptr_2 = static_cast<const __half*>(dout_ptr) + output_offset_2;
     // {batch_size, num_heads, seq_len, seq_len}
     __half* new_softmax_ptr_2 = static_cast<__half*>(softmax_ptr) + (group_len[0] + group_len[1]) * num_heads * 512 * 512; 
     if (group_len[2] > 0) {
