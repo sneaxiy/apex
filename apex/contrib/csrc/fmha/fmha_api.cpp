@@ -227,10 +227,9 @@ void fmhalib_fwd(const void *qkv_ptr,
     ASSERT_CHECK(dprops->major == 8 && dprops->minor == 0);
     
     /*
-     *[3, 3, 2, 1]
-     *[0, 3, 6, 8, 9]
+     *cu_seqlens_ptr: [0, 3, 6, 8, 9]
+     *seq_len_per_sample: [3, 3, 2, 1]
      *seq_len_group_idx: [0, 6, 8, 9]
-     * 
      * */
     const int group_size = 3;
     std::vector<int> seq_len_per_sample(batch_size); 
@@ -249,7 +248,7 @@ void fmhalib_fwd(const void *qkv_ptr,
 
       for (int i = 0; i < batch_size; i++) {
         seq_len_per_sample[i] = static_cast<const int*>(host_cu_seqlens_ptr)[i + 1] - static_cast<const int*>(host_cu_seqlens_ptr)[i];
-        // round so as the elements in array is among [512, 384, 128].
+        // round so as the elements are among [512, 384, 128].
         seq_len_per_sample[i] = seq_len_round(seq_len_per_sample[i]);
         if (i > 0) {
           if (seq_len_per_sample[i] != seq_len_per_sample[i - 1]) {
@@ -265,23 +264,11 @@ void fmhalib_fwd(const void *qkv_ptr,
       group_len[cur_group] = cur_group_len;
     }
 
-#if 1 
-    // printf("batch_size = %d\n", batch_size); 
-    // printf("group_size = %d, %d, %d\n", group_len[0], group_len[1], group_len[2]);
-#endif
     if (is_training) {
       if (group_len[0] + group_len[1] + group_len[2] != batch_size) {
         ASSERT_CHECK(false);
       }
     }
-#if 0 
-    //for (int i = 0; i < batch_size; i++) {
-    //  printf("seq_len_per_sample[%d] = %d\n", i, seq_len_per_sample[i]);
-    //}
-    for (int i = 0; i < group_size; i++) {
-      printf("seq_len_group_idx[%d] = %d\n", i, seq_len_group_idx[i]);
-    }
-#endif
    
     if (stream_384 == NULL) {
       cudaStreamCreate(&stream_384);
@@ -316,7 +303,6 @@ void fmhalib_fwd(const void *qkv_ptr,
 
     if( zero_tensors ) {
         SetZero(ctx_ptr, 2, {total, num_heads, head_size}, stream);  
-        // SetZero(s_ptr, 2, {batch_size, num_heads, seq_len, seq_len}, stream);
         SetZero(s_ptr, 2, {batch_size, num_heads, 512, 512}, stream);
     }
     cudaEventRecord(event_512_before, stream);
@@ -331,7 +317,7 @@ void fmhalib_fwd(const void *qkv_ptr,
                ctx_ptr,
                s_ptr,
                p_dropout);
-#if 1 
+
     if (is_training && group_len[1] > 0) {
       int qkv_offset = seq_len_group_idx[1] * head_size * num_heads * 3;
       const __half* new_qkv_ptr = static_cast<const __half*>(qkv_ptr) + qkv_offset;
@@ -368,7 +354,6 @@ void fmhalib_fwd(const void *qkv_ptr,
                static_cast<void*>(new_s_ptr),
                p_dropout);
     }
-#endif
 
     launch_512(launch_params_512, /*configure=*/ true);
     
@@ -550,11 +535,6 @@ void fmhalib_bwd(const void *dout_ptr,
     seq_len_group_idx[cur_idx] = static_cast<const int*>(host_cu_seqlens_ptr)[batch_size];
     group_len[cur_group] = cur_group_len;
     
-    // printf("limin: begin backward\n");
-#if 0 
-    printf("batch_size = %d\n", batch_size); 
-    printf("group_size = %d, %d, %d\n", group_len[0], group_len[1], group_len[2]);
-#endif
     if (group_len[0] + group_len[1] + group_len[2] != batch_size) {
         ASSERT_CHECK(false);
     }
@@ -565,12 +545,7 @@ void fmhalib_bwd(const void *dout_ptr,
     auto launch_512 = &run_fmha_dgrad_fp16_512_64_sm80;
     auto launch_384 = &run_fmha_dgrad_fp16_384_64_sm80;
     auto launch_128 = &run_fmha_dgrad_fp16_128_64_sm80;
-#if 0 
-    cudaStream_t stream_384;
-    cudaStream_t stream_128;
-    cudaStreamCreate(&stream_384);
-    cudaStreamCreate(&stream_128);
-#endif
+
     if (stream_384 == NULL) {
       cudaStreamCreate(&stream_384);
     }
@@ -611,16 +586,14 @@ void fmhalib_bwd(const void *dout_ptr,
                const_cast<void*>(dout_ptr),     // we set o_ptr to dout
                softmax_ptr,  // softmax gets overwritten by dP!
                p_dropout);
-#if 1 
+
     int qkv_offset = seq_len_group_idx[1] * head_size * num_heads * 3;
     int output_offset = seq_len_group_idx[1] * head_size * num_heads;
     const __half* new_qkv_ptr = static_cast<const __half*>(qkv_ptr) + qkv_offset;
     const int* new_cu_seqlens_ptr = static_cast<const int*>(cu_seqlens_ptr) + group_len[0];
     const __half* new_dout_ptr = static_cast<const __half*>(dout_ptr) + output_offset;
-    // limin-todo: 
     __half* new_softmax_ptr = static_cast<__half*>(softmax_ptr) + group_len[0] * num_heads * 512 * 512; 
     if (group_len[1] > 0) {
-      // printf("384_bs = %d, seq_len_384=%d\n", group_len[1], seq_len_384);
       set_params(params_384,
                group_len[1], // batch_size,
                seq_len_384, // seq_len,
@@ -652,15 +625,13 @@ void fmhalib_bwd(const void *dout_ptr,
                static_cast<void*>(new_softmax_ptr_2),  // softmax gets overwritten by dP!
                p_dropout);
     }
-#endif
 
     // we're re-using these scales
     Data_type acc_type = DATA_TYPE_FP32;
-    // limin-todo: 
     set_alpha(params.scale_bmm1, 1.f, acc_type);
     set_alpha(params.scale_softmax, 1.f / sqrtf(head_size), acc_type);
     set_alpha(params.scale_bmm2, 1.f, DATA_TYPE_FP16);
-#if 1 
+    
     set_alpha(params_384.scale_bmm1, 1.f, acc_type);
     set_alpha(params_384.scale_softmax, 1.f / sqrtf(head_size), acc_type);
     set_alpha(params_384.scale_bmm2, 1.f, DATA_TYPE_FP16);
@@ -668,19 +639,14 @@ void fmhalib_bwd(const void *dout_ptr,
     set_alpha(params_128.scale_bmm1, 1.f, acc_type);
     set_alpha(params_128.scale_softmax, 1.f / sqrtf(head_size), acc_type);
     set_alpha(params_128.scale_bmm2, 1.f, DATA_TYPE_FP16);
-#endif
 
-    // limin-todo: 
     params.dqkv_ptr = dqkv_ptr;
-#if 1 
     params_384.dqkv_ptr = static_cast<void*>(static_cast<__half*>(dqkv_ptr) + qkv_offset);
     params_128.dqkv_ptr = static_cast<void*>(static_cast<__half*>(dqkv_ptr) + qkv_offset_2);
-#endif
 
     launch_512(params, stream);
     cudaEventRecord(event, stream);
       
-#if 1 
     if (group_len[1] > 0) {
       // begin to exec after the precedding op of fmha finishes.
       cudaStreamWaitEvent(stream_384, event_512_before);
@@ -693,7 +659,6 @@ void fmhalib_bwd(const void *dout_ptr,
       launch_128(params_128, stream_128);
       cudaEventRecord(event_128, stream_128);
     }
-#endif
     cudaStreamWaitEvent(stream, event);
     cudaStreamWaitEvent(stream, event_384);
     cudaStreamWaitEvent(stream, event_128);
