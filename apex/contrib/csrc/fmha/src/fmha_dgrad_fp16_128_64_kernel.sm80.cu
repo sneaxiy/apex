@@ -36,7 +36,7 @@ extern "C" __global__ void fmha_dgrad_fp16_128_64_sm80_kernel(Fused_multihead_at
 }
 
 void run_fmha_dgrad_fp16_128_64_sm80(const Fused_multihead_attention_fprop_params &params, cudaStream_t stream) {
-
+    // printf("run_fmha_dgrad_fp16_128_64_sm80\n");
     constexpr int smem_size_softmax = Kernel_traits::Cta_tile_p::M * Kernel_traits::Cta_tile_p::WARPS_N * sizeof(float);
     constexpr int smem_size_q = Kernel_traits::Smem_tile_q::BYTES_PER_TILE;
     constexpr int smem_size_v = Kernel_traits::Smem_tile_v::BYTES_PER_TILE;
@@ -56,5 +56,6 @@ void run_fmha_dgrad_fp16_128_64_sm80(const Fused_multihead_attention_fprop_param
             fmha_dgrad_fp16_128_64_sm80_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
     }
     dim3 grid(params.h, params.b);
+    // printf("begin launch, params.h=%d, params.b=%d, threas_per_block=%d\n", params.h, params.b, Kernel_traits::THREADS);
     fmha_dgrad_fp16_128_64_sm80_kernel<<<grid, Kernel_traits::THREADS, smem_size, stream>>>(params);
 }
