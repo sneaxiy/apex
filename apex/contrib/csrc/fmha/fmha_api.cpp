@@ -191,7 +191,8 @@ static void SetZero(void *ptr, size_t sizeof_type, std::initializer_list<int> sh
     ASSERT_CHECK(cudaMemsetAsync(ptr, 0, n, stream) == cudaSuccess); 
 }
 
-int seq_len_round(int real_seq_len) {
+int seq_len_round(int real_seq_len, bool use_256_kernel = false) {
+ if (!use_256_kernel) {
    if (real_seq_len > 384) {
      return 512;
    } else if (real_seq_len > 128) {
@@ -201,10 +202,25 @@ int seq_len_round(int real_seq_len) {
    } else {
      ASSERT_CHECK(false);
    }
+ } else {
+   if (real_seq_len > 384) {
+     return 512;
+   } else if (real_seq_len > 256) {
+     return 384; 
+   } else if (real_seq_len > 128) {
+     return 256; 
+   } else if (real_seq_len > 0){
+     return 128; 
+   } else {
+     ASSERT_CHECK(false);
+   }
+ }
 }
   
 cudaStream_t stream_384;
+cudaStream_t stream_256;
 cudaStream_t stream_128;
+const bool use_256_kernel = true;
 
 void fmhalib_fwd(const void *qkv_ptr,
                  const void *cu_seqlens_ptr,
@@ -230,8 +246,9 @@ void fmhalib_fwd(const void *qkv_ptr,
      *cu_seqlens_ptr: [0, 3, 6, 8, 9]
      *seq_len_per_sample: [3, 3, 2, 1]
      *seq_len_group_idx: [0, 6, 8, 9]
+     *group_len:[6, 2, 1]
      * */
-    const int group_size = 3;
+    const int group_size = use_256_kernel ? 4 : 3;
     std::vector<int> seq_len_per_sample(batch_size); 
     std::vector<int> seq_len_group_idx(group_size);
     std::vector<int> group_len(group_size);
@@ -247,9 +264,10 @@ void fmhalib_fwd(const void *qkv_ptr,
       seq_len_group_idx[cur_idx++] = 0;
 
       for (int i = 0; i < batch_size; i++) {
-        seq_len_per_sample[i] = static_cast<const int*>(host_cu_seqlens_ptr)[i + 1] - static_cast<const int*>(host_cu_seqlens_ptr)[i];
-        // round so as the elements are among [512, 384, 128].
-        seq_len_per_sample[i] = seq_len_round(seq_len_per_sample[i]);
+        seq_len_per_sample[i] = static_cast<const int*>(host_cu_seqlens_ptr)[i + 1]
+		- static_cast<const int*>(host_cu_seqlens_ptr)[i];
+        // round so as the elements are among [512, 384, 256, 128].
+        seq_len_per_sample[i] = seq_len_round(seq_len_per_sample[i], use_256_kernel);
         if (i > 0) {
           if (seq_len_per_sample[i] != seq_len_per_sample[i - 1]) {
 	    seq_len_group_idx[cur_idx++] = static_cast<const int*>(host_cu_seqlens_ptr)[i];
@@ -265,13 +283,19 @@ void fmhalib_fwd(const void *qkv_ptr,
     }
 
     if (is_training) {
-      if (group_len[0] + group_len[1] + group_len[2] != batch_size) {
+      int all_group_size = use_256_kernel ?
+	      (group_len[0] + group_len[1] + group_len[2] + group_len[3]) :
+	      (group_len[0] + group_len[1] + group_len[2]);
+      if (all_group_size != batch_size) {
         ASSERT_CHECK(false);
       }
     }
-   
+
     if (stream_384 == NULL) {
       cudaStreamCreate(&stream_384);
+    }
+    if (stream_256 == NULL) {
+      cudaStreamCreate(&stream_256);
     }
     if (stream_128 == NULL) {
       cudaStreamCreate(&stream_128);
@@ -279,23 +303,32 @@ void fmhalib_fwd(const void *qkv_ptr,
 
     cudaEvent_t event;
     cudaEvent_t event_384;
+    cudaEvent_t event_256;
     cudaEvent_t event_128;
     cudaEvent_t event_512_before;
 
     cudaEventCreate(&event);
     cudaEventCreate(&event_384);
+    cudaEventCreate(&event_256);
     cudaEventCreate(&event_128);
     cudaEventCreate(&event_512_before);
 
-    Launch_params<Fused_multihead_attention_fprop_params> launch_params_512(dprops, stream, is_training, is_nl);
-    Launch_params<Fused_multihead_attention_fprop_params> launch_params_128(dprops, stream_128, is_training, is_nl);
-    Launch_params<Fused_multihead_attention_fprop_params> launch_params_384(dprops, stream_384, is_training, is_nl);
+    Launch_params<Fused_multihead_attention_fprop_params> launch_params_512(dprops, 
+		    stream, is_training, is_nl);
+    Launch_params<Fused_multihead_attention_fprop_params> launch_params_384(dprops, 
+		    stream_384, is_training, is_nl);
+    Launch_params<Fused_multihead_attention_fprop_params> launch_params_256(dprops, 
+		    stream_256, is_training, is_nl);
+    Launch_params<Fused_multihead_attention_fprop_params> launch_params_128(dprops, 
+		    stream_128, is_training, is_nl);
     
     int seq_len_512 = 512;
     int seq_len_384 = 384;
+    int seq_len_256 = 256;
     int seq_len_128 = 128;
     auto launch_512 = &run_fmha_fp16_512_64_sm80;
     auto launch_384 = &run_fmha_fp16_384_64_sm80;
+    auto launch_256 = &run_fmha_fp16_256_64_sm80;
     auto launch_128 = &run_fmha_fp16_128_64_sm80;
 
     ASSERT_CHECK(batch_size > 0);
@@ -308,7 +341,8 @@ void fmhalib_fwd(const void *qkv_ptr,
     cudaEventRecord(event_512_before, stream);
     
     set_params(launch_params_512.params,
-               is_training ? group_len[0] : batch_size, // only training use multiple fmha kernel methods!
+	       // Note: only training use multiple fmha kernel methods!
+               is_training ? group_len[0] : batch_size, 
                seq_len_512,
                num_heads,
                head_size,
@@ -323,11 +357,13 @@ void fmhalib_fwd(const void *qkv_ptr,
       const __half* new_qkv_ptr = static_cast<const __half*>(qkv_ptr) + qkv_offset;
       const int* new_cu_seqlens_ptr = static_cast<const int*>(cu_seqlens_ptr) + group_len[0];
       // {total, num_heads, head_size}
-      __half* new_ctx_ptr = static_cast<__half*>(ctx_ptr) + seq_len_group_idx[1] * num_heads * head_size;
+      __half* new_ctx_ptr = static_cast<__half*>(ctx_ptr) 
+	      + seq_len_group_idx[1] * num_heads * head_size;
       // batch_size, num_heads, seq_len, seq_len
-      __half* new_s_ptr = static_cast<__half*>(s_ptr) + group_len[0] * num_heads * 512 * 512; 
+      __half* new_s_ptr = static_cast<__half*>(s_ptr) 
+	      + group_len[0] * num_heads * 512 * 512; 
       set_params(launch_params_384.params,
-               group_len[1], // batch_size,
+               group_len[1],  
                seq_len_384,
                num_heads,
                head_size,
@@ -337,14 +373,19 @@ void fmhalib_fwd(const void *qkv_ptr,
                static_cast<void*>(new_s_ptr),
                p_dropout);
     }
-    if (is_training  && group_len[2] > 0) {
-      int qkv_offset = seq_len_group_idx[2] * head_size * num_heads * 3;
-      const __half* new_qkv_ptr = static_cast<const __half*>(qkv_ptr) + qkv_offset;
-      const int* new_cu_seqlens_ptr = static_cast<const int*>(cu_seqlens_ptr) + group_len[0] + group_len[1]; 
-      __half* new_ctx_ptr = static_cast<__half*>(ctx_ptr) + seq_len_group_idx[2] * num_heads * head_size;
-      __half* new_s_ptr = static_cast<__half*>(s_ptr) + (group_len[0] + group_len[1]) * num_heads * 512 * 512; 
-      set_params(launch_params_128.params,
-               group_len[2], // batch_size,
+    if (!use_256_kernel) {
+      // use 128 kernels.
+      if (is_training  && group_len[2] > 0) {
+        int qkv_offset = seq_len_group_idx[2] * head_size * num_heads * 3;
+        const __half* new_qkv_ptr = static_cast<const __half*>(qkv_ptr) + qkv_offset;
+        const int* new_cu_seqlens_ptr = static_cast<const int*>(cu_seqlens_ptr)
+		+ group_len[0] + group_len[1];
+        __half* new_ctx_ptr = static_cast<__half*>(ctx_ptr)
+		+ seq_len_group_idx[2] * num_heads * head_size;
+        __half* new_s_ptr = static_cast<__half*>(s_ptr)
+		+ (group_len[0] + group_len[1]) * num_heads * 512 * 512;
+        set_params(launch_params_128.params,
+               group_len[2], 
                seq_len_128,
                num_heads,
                head_size,
@@ -353,6 +394,49 @@ void fmhalib_fwd(const void *qkv_ptr,
                static_cast<void*>(new_ctx_ptr),
                static_cast<void*>(new_s_ptr),
                p_dropout);
+      }
+    } else {
+      // use 256_kernel
+      if (is_training  && group_len[2] > 0) {
+        int qkv_offset = seq_len_group_idx[2] * head_size * num_heads * 3;
+        const __half* new_qkv_ptr = static_cast<const __half*>(qkv_ptr) + qkv_offset;
+        const int* new_cu_seqlens_ptr = static_cast<const int*>(cu_seqlens_ptr)
+		+ group_len[0] + group_len[1];
+        __half* new_ctx_ptr = static_cast<__half*>(ctx_ptr) 
+		+ seq_len_group_idx[2] * num_heads * head_size;
+        __half* new_s_ptr = static_cast<__half*>(s_ptr)
+		+ (group_len[0] + group_len[1]) * num_heads * 512 * 512;
+        set_params(launch_params_256.params,
+               group_len[2], 
+               seq_len_256,
+               num_heads,
+               head_size,
+               const_cast<void*>(static_cast<const void*>(new_qkv_ptr)),
+               const_cast<void*>(static_cast<const void*>(new_cu_seqlens_ptr)),
+               static_cast<void*>(new_ctx_ptr),
+               static_cast<void*>(new_s_ptr),
+               p_dropout);
+      }
+      if (is_training  && group_len[3] > 0) {
+        int qkv_offset = seq_len_group_idx[3] * head_size * num_heads * 3;
+        const __half* new_qkv_ptr = static_cast<const __half*>(qkv_ptr) + qkv_offset;
+        const int* new_cu_seqlens_ptr = static_cast<const int*>(cu_seqlens_ptr) 
+		+ group_len[0] + group_len[1] + group_len[2]; 
+        __half* new_ctx_ptr = static_cast<__half*>(ctx_ptr) 
+		+ seq_len_group_idx[3] * num_heads * head_size;
+        __half* new_s_ptr = static_cast<__half*>(s_ptr) 
+		+ (group_len[0] + group_len[1] + group_len[2]) * num_heads * 512 * 512; 
+        set_params(launch_params_128.params,
+               group_len[3], // batch_size,
+               seq_len_128,
+               num_heads,
+               head_size,
+               const_cast<void*>(static_cast<const void*>(new_qkv_ptr)),
+               const_cast<void*>(static_cast<const void*>(new_cu_seqlens_ptr)),
+               static_cast<void*>(new_ctx_ptr),
+               static_cast<void*>(new_s_ptr),
+               p_dropout);
+      }
     }
 
     launch_512(launch_params_512, /*configure=*/ true);
@@ -361,9 +445,20 @@ void fmhalib_fwd(const void *qkv_ptr,
       cudaStreamWaitEvent(stream_384, event_512_before);
       launch_384(launch_params_384, /*configure=*/ true);
     }
-    if (is_training && group_len[2] > 0) {
-      cudaStreamWaitEvent(stream_128, event_512_before);
-      launch_128(launch_params_128, /*configure=*/ true);
+    if (!use_256_kernel) {
+      if (is_training && group_len[2] > 0) {
+        cudaStreamWaitEvent(stream_128, event_512_before);
+        launch_128(launch_params_128, /*configure=*/ true);
+      }
+    } else {
+      if (is_training && group_len[2] > 0) {
+        cudaStreamWaitEvent(stream_256, event_512_before);
+        launch_256(launch_params_256, /*configure=*/ true);
+      }
+      if (is_training && group_len[3] > 0) {
+        cudaStreamWaitEvent(stream_128, event_512_before);
+        launch_128(launch_params_128, /*configure=*/ true);
+      }
     }
 
     if ( is_training ) {
@@ -372,11 +467,22 @@ void fmhalib_fwd(const void *qkv_ptr,
 	if (group_len[1] > 0) {
           int64_t counter_offset = launch_params_384.elts_per_thread;
           SetPhiloxCudaState(&launch_params_384.params.philox_args, seed_inc_func, counter_offset);
-	}	
-	if (group_len[2] > 0) {
-          int64_t counter_offset = launch_params_128.elts_per_thread;
-          SetPhiloxCudaState(&launch_params_128.params.philox_args, seed_inc_func, counter_offset);
-	}	
+	}
+        if (!use_256_kernel) {	
+	  if (group_len[2] > 0) {
+            int64_t counter_offset = launch_params_128.elts_per_thread;
+            SetPhiloxCudaState(&launch_params_128.params.philox_args, seed_inc_func, counter_offset);
+	  }
+	} else {
+	  if (group_len[2] > 0) {
+            int64_t counter_offset = launch_params_256.elts_per_thread;
+            SetPhiloxCudaState(&launch_params_256.params.philox_args, seed_inc_func, counter_offset);
+	  }
+	  if (group_len[3] > 0) {
+            int64_t counter_offset = launch_params_128.elts_per_thread;
+            SetPhiloxCudaState(&launch_params_128.params.philox_args, seed_inc_func, counter_offset);
+	  }
+	} 	
     }
     
     launch_512(launch_params_512, /*configure=*/ false);
@@ -386,19 +492,36 @@ void fmhalib_fwd(const void *qkv_ptr,
       launch_384(launch_params_384, /*configure=*/ false);
       cudaEventRecord(event_384, stream_384);
     }
-    if (is_training && group_len[2] > 0) {
-      launch_128(launch_params_128, /*configure=*/ false);
-      cudaEventRecord(event_128, stream_128);
+    if (!use_256_kernel) {
+      if (is_training && group_len[2] > 0) {
+        launch_128(launch_params_128, /*configure=*/ false);
+        cudaEventRecord(event_128, stream_128);
+      }
+    } else {
+      if (is_training && group_len[2] > 0) {
+        launch_256(launch_params_256, /*configure=*/ false);
+        cudaEventRecord(event_256, stream_256);
+      }
+      if (is_training && group_len[3] > 0) {
+        launch_128(launch_params_128, /*configure=*/ false);
+        cudaEventRecord(event_128, stream_128);
+      }
     }
     
-    // stream will go on executing until events on stream_384/128 finishes.
-    cudaStreamWaitEvent(stream, event);
-    cudaStreamWaitEvent(stream, event_384);
-    cudaStreamWaitEvent(stream, event_128);
+    // stream will go on executing until events on stream_384/256/128 finishes.
+    if (is_training) {
+      cudaStreamWaitEvent(stream, event);
+      cudaStreamWaitEvent(stream, event_384);
+      cudaStreamWaitEvent(stream, event_128);
+      if (use_256_kernel) {
+        cudaStreamWaitEvent(stream, event_256);
+      }
+    }
 
     cudaEventDestroy(event);
     cudaEventDestroy(event_384);
     cudaEventDestroy(event_128);
+    cudaEventDestroy(event_256);
 
     FMHALIB_END_FUNC
 }
@@ -504,7 +627,7 @@ void fmhalib_bwd(const void *dout_ptr,
     auto dprops = GetCurrentDeviceProperties();
     ASSERT_CHECK(dprops->major == 8 && dprops->minor == 0);
     
-    const int group_size = 3;
+    const int group_size = use_256_kernel ? 4 : 3;
     std::vector<int> seq_len_per_sample(batch_size); 
     std::vector<int> seq_len_group_idx(group_size);
     std::vector<int> group_len(group_size);
@@ -519,9 +642,10 @@ void fmhalib_bwd(const void *dout_ptr,
     int cur_idx = 0;
     seq_len_group_idx[cur_idx++] = 0; 
     for (int i = 0; i < batch_size; i++) {
-      seq_len_per_sample[i] = static_cast<const int*>(host_cu_seqlens_ptr)[i + 1] - static_cast<const int*>(host_cu_seqlens_ptr)[i];
-      // round so as the elements in array is among [512, 384, 128].
-      seq_len_per_sample[i] = seq_len_round(seq_len_per_sample[i]);
+      seq_len_per_sample[i] = static_cast<const int*>(host_cu_seqlens_ptr)[i + 1] 
+	      - static_cast<const int*>(host_cu_seqlens_ptr)[i];
+      // round so as the elements in array is among [512, 384, 256, 128].
+      seq_len_per_sample[i] = seq_len_round(seq_len_per_sample[i], use_256_kernel);
       if (i > 0) {
         if (seq_len_per_sample[i] != seq_len_per_sample[i - 1]) {
 	  seq_len_group_idx[cur_idx++] = static_cast<const int*>(host_cu_seqlens_ptr)[i];
@@ -535,19 +659,27 @@ void fmhalib_bwd(const void *dout_ptr,
     seq_len_group_idx[cur_idx] = static_cast<const int*>(host_cu_seqlens_ptr)[batch_size];
     group_len[cur_group] = cur_group_len;
     
-    if (group_len[0] + group_len[1] + group_len[2] != batch_size) {
+    int all_group_size = use_256_kernel ?
+	    (group_len[0] + group_len[1] + group_len[2] + group_len[3]):
+	    (group_len[0] + group_len[1] + group_len[2]);
+    if (all_group_size != batch_size) {
         ASSERT_CHECK(false);
     }
 
     int seq_len_512 = 512;
     int seq_len_384 = 384;
+    int seq_len_256 = 256;
     int seq_len_128 = 128;
     auto launch_512 = &run_fmha_dgrad_fp16_512_64_sm80;
     auto launch_384 = &run_fmha_dgrad_fp16_384_64_sm80;
+    auto launch_256 = &run_fmha_dgrad_fp16_256_64_sm80;
     auto launch_128 = &run_fmha_dgrad_fp16_128_64_sm80;
 
     if (stream_384 == NULL) {
       cudaStreamCreate(&stream_384);
+    }
+    if (stream_256 == NULL) {
+      cudaStreamCreate(&stream_256);
     }
     if (stream_128 == NULL) {
       cudaStreamCreate(&stream_128);
@@ -555,11 +687,13 @@ void fmhalib_bwd(const void *dout_ptr,
 
     cudaEvent_t event;
     cudaEvent_t event_384;
+    cudaEvent_t event_256;
     cudaEvent_t event_128;
     cudaEvent_t event_512_before;
 
     cudaEventCreate(&event);
     cudaEventCreate(&event_384);
+    cudaEventCreate(&event_256);
     cudaEventCreate(&event_128);
     cudaEventCreate(&event_512_before);
     
@@ -574,11 +708,12 @@ void fmhalib_bwd(const void *dout_ptr,
 
     Fused_multihead_attention_fprop_params params;
     Fused_multihead_attention_fprop_params params_384;
+    Fused_multihead_attention_fprop_params params_256;
     Fused_multihead_attention_fprop_params params_128;
 
     set_params(params,
-               group_len[0], //batch_size,
-               seq_len_512, // seq_len,
+               group_len[0], 
+               seq_len_512, 
                num_heads,
                head_size,
                const_cast<void*>(qkv_ptr),
@@ -586,17 +721,19 @@ void fmhalib_bwd(const void *dout_ptr,
                const_cast<void*>(dout_ptr),     // we set o_ptr to dout
                softmax_ptr,  // softmax gets overwritten by dP!
                p_dropout);
+    params.dqkv_ptr = dqkv_ptr;
 
     int qkv_offset = seq_len_group_idx[1] * head_size * num_heads * 3;
     int output_offset = seq_len_group_idx[1] * head_size * num_heads;
     const __half* new_qkv_ptr = static_cast<const __half*>(qkv_ptr) + qkv_offset;
     const int* new_cu_seqlens_ptr = static_cast<const int*>(cu_seqlens_ptr) + group_len[0];
     const __half* new_dout_ptr = static_cast<const __half*>(dout_ptr) + output_offset;
-    __half* new_softmax_ptr = static_cast<__half*>(softmax_ptr) + group_len[0] * num_heads * 512 * 512; 
+    __half* new_softmax_ptr = static_cast<__half*>(softmax_ptr)
+	    + group_len[0] * num_heads * 512 * 512;
     if (group_len[1] > 0) {
       set_params(params_384,
-               group_len[1], // batch_size,
-               seq_len_384, // seq_len,
+               group_len[1],  
+               seq_len_384,  
                num_heads,
                head_size,
                const_cast<void*>(static_cast<const void*>(new_qkv_ptr)),
@@ -605,25 +742,79 @@ void fmhalib_bwd(const void *dout_ptr,
                static_cast<void*>(new_softmax_ptr),  // softmax gets overwritten by dP!
                p_dropout);
     }
-    int qkv_offset_2 = seq_len_group_idx[2] * head_size * num_heads * 3;
-    int output_offset_2 = seq_len_group_idx[2] * head_size * num_heads;
-    const __half* new_qkv_ptr_2 = static_cast<const __half*>(qkv_ptr) + qkv_offset_2;
-    const int* new_cu_seqlens_ptr_2 = static_cast<const int*>(cu_seqlens_ptr) + group_len[0] + group_len[1];
-    const __half* new_dout_ptr_2 = static_cast<const __half*>(dout_ptr) + output_offset_2;
-    // {batch_size, num_heads, seq_len, seq_len}
-    __half* new_softmax_ptr_2 = static_cast<__half*>(softmax_ptr) + (group_len[0] + group_len[1]) * num_heads * 512 * 512; 
-    if (group_len[2] > 0) {
-      set_params(params_128,
-               group_len[2], // batch_size,
-               seq_len_128, // seq_len,
+    params_384.dqkv_ptr = static_cast<void*>(static_cast<__half*>(dqkv_ptr) + qkv_offset);
+   
+    if (!use_256_kernel) {
+      int qkv_offset_2 = seq_len_group_idx[2] * head_size * num_heads * 3;
+      int output_offset_2 = seq_len_group_idx[2] * head_size * num_heads;
+      const __half* new_qkv_ptr_2 = static_cast<const __half*>(qkv_ptr) + qkv_offset_2;
+      const int* new_cu_seqlens_ptr_2 = static_cast<const int*>(cu_seqlens_ptr)
+	      + group_len[0] + group_len[1];
+      const __half* new_dout_ptr_2 = static_cast<const __half*>(dout_ptr) + output_offset_2;
+      // {batch_size, num_heads, seq_len, seq_len}
+      __half* new_softmax_ptr_2 = static_cast<__half*>(softmax_ptr)
+	      + (group_len[0] + group_len[1]) * num_heads * 512 * 512;
+      if (group_len[2] > 0) {
+        set_params(params_128,
+               group_len[2], 
+               seq_len_128,  
                num_heads,
                head_size,
                const_cast<void*>(static_cast<const void*>(new_qkv_ptr_2)),
                const_cast<void*>(static_cast<const void*>(new_cu_seqlens_ptr_2)),
                const_cast<void*>(static_cast<const void*>(new_dout_ptr_2)),     // we set o_ptr to dout
-	       // limin-todo: 
                static_cast<void*>(new_softmax_ptr_2),  // softmax gets overwritten by dP!
                p_dropout);
+      }
+      params_128.dqkv_ptr = static_cast<void*>(static_cast<__half*>(dqkv_ptr) + qkv_offset_2);
+    } else {
+      // for 256 kernel.
+      int qkv_offset_2 = seq_len_group_idx[2] * head_size * num_heads * 3;
+      int output_offset_2 = seq_len_group_idx[2] * head_size * num_heads;
+      const __half* new_qkv_ptr_2 = static_cast<const __half*>(qkv_ptr) + qkv_offset_2;
+      const int* new_cu_seqlens_ptr_2 = static_cast<const int*>(cu_seqlens_ptr)
+	      + group_len[0] + group_len[1];
+      const __half* new_dout_ptr_2 = static_cast<const __half*>(dout_ptr) + output_offset_2;
+      // {batch_size, num_heads, seq_len, seq_len}
+      __half* new_softmax_ptr_2 = static_cast<__half*>(softmax_ptr)
+	      + (group_len[0] + group_len[1]) * num_heads * 512 * 512;
+      if (group_len[2] > 0) {
+        set_params(params_256,
+               group_len[2], 
+               seq_len_256,  
+               num_heads,
+               head_size,
+               const_cast<void*>(static_cast<const void*>(new_qkv_ptr_2)),
+               const_cast<void*>(static_cast<const void*>(new_cu_seqlens_ptr_2)),
+               const_cast<void*>(static_cast<const void*>(new_dout_ptr_2)),     // we set o_ptr to dout
+               static_cast<void*>(new_softmax_ptr_2),  // softmax gets overwritten by dP!
+               p_dropout);
+      }
+      params_256.dqkv_ptr = static_cast<void*>(static_cast<__half*>(dqkv_ptr) + qkv_offset_2);
+      
+      //  for 128 kernel.
+      int qkv_offset_3 = seq_len_group_idx[3] * head_size * num_heads * 3;
+      int output_offset_3 = seq_len_group_idx[3] * head_size * num_heads;
+      const __half* new_qkv_ptr_3 = static_cast<const __half*>(qkv_ptr) + qkv_offset_3;
+      const int* new_cu_seqlens_ptr_3 = static_cast<const int*>(cu_seqlens_ptr) 
+	      + group_len[0] + group_len[1] + group_len[2];
+      const __half* new_dout_ptr_3 = static_cast<const __half*>(dout_ptr) + output_offset_3;
+      // {batch_size, num_heads, seq_len, seq_len}
+      __half* new_softmax_ptr_3 = static_cast<__half*>(softmax_ptr) 
+	      + (group_len[0] + group_len[1] + group_len[2]) * num_heads * 512 * 512; 
+      if (group_len[3] > 0) {
+        set_params(params_128,
+               group_len[3], 
+               seq_len_128,  
+               num_heads,
+               head_size,
+               const_cast<void*>(static_cast<const void*>(new_qkv_ptr_3)),
+               const_cast<void*>(static_cast<const void*>(new_cu_seqlens_ptr_3)),
+               const_cast<void*>(static_cast<const void*>(new_dout_ptr_3)),     // we set o_ptr to dout
+               static_cast<void*>(new_softmax_ptr_3),  // softmax gets overwritten by dP!
+               p_dropout);
+      }
+      params_128.dqkv_ptr = static_cast<void*>(static_cast<__half*>(dqkv_ptr) + qkv_offset_3);
     }
 
     // we're re-using these scales
@@ -640,9 +831,11 @@ void fmhalib_bwd(const void *dout_ptr,
     set_alpha(params_128.scale_softmax, 1.f / sqrtf(head_size), acc_type);
     set_alpha(params_128.scale_bmm2, 1.f, DATA_TYPE_FP16);
 
-    params.dqkv_ptr = dqkv_ptr;
-    params_384.dqkv_ptr = static_cast<void*>(static_cast<__half*>(dqkv_ptr) + qkv_offset);
-    params_128.dqkv_ptr = static_cast<void*>(static_cast<__half*>(dqkv_ptr) + qkv_offset_2);
+    if (use_256_kernel) {
+      set_alpha(params_256.scale_bmm1, 1.f, acc_type);
+      set_alpha(params_256.scale_softmax, 1.f / sqrtf(head_size), acc_type);
+      set_alpha(params_256.scale_bmm2, 1.f, DATA_TYPE_FP16);
+    } 
 
     launch_512(params, stream);
     cudaEventRecord(event, stream);
@@ -653,19 +846,35 @@ void fmhalib_bwd(const void *dout_ptr,
       launch_384(params_384, stream_384);
       cudaEventRecord(event_384, stream_384);
     }
-    if (group_len[2] > 0) {
-      // begin to exec after the precedding op of fmha finishes.
-      cudaStreamWaitEvent(stream_128, event_512_before);
-      launch_128(params_128, stream_128);
-      cudaEventRecord(event_128, stream_128);
+    if (!use_256_kernel) {
+      if (group_len[2] > 0) {
+        // begin to exec after the precedding op of fmha finishes.
+        cudaStreamWaitEvent(stream_128, event_512_before);
+        launch_128(params_128, stream_128);
+        cudaEventRecord(event_128, stream_128);
+      }
+    } else {
+      if (group_len[2] > 0) {
+        cudaStreamWaitEvent(stream_256, event_512_before);
+        launch_256(params_256, stream_256);
+        cudaEventRecord(event_256, stream_256);
+      }
+      if (group_len[3] > 0) {
+        cudaStreamWaitEvent(stream_128, event_512_before);
+        launch_128(params_128, stream_128);
+        cudaEventRecord(event_128, stream_128);
+      }
     }
     cudaStreamWaitEvent(stream, event);
     cudaStreamWaitEvent(stream, event_384);
     cudaStreamWaitEvent(stream, event_128);
-    
+    if (use_256_kernel) {
+      cudaStreamWaitEvent(stream, event_256);
+    }
 
     cudaEventDestroy(event);
     cudaEventDestroy(event_384);
+    cudaEventDestroy(event_256);
     cudaEventDestroy(event_128);
 
     FMHALIB_END_FUNC
